@@ -201,12 +201,25 @@ Parse and return the resulting JSON object."
       (kill-buffer json-buffer)
       (kill-buffer input-buffer))))
 
+(defvar go-guru-filename-filter-hooks '())
+(setq go-guru-filename-filter-hooks '())
+
+(add-to-list 'go-guru-filename-filter-hooks
+			 (lambda (fname)
+			   (replace-regexp-in-string (getenv "GO_GURU_REMOTE_GOPATH") (getenv "GOPATH") fname)))
+
+(add-to-list 'go-guru-filename-filter-hooks
+			 (lambda (fname)
+			   (replace-regexp-in-string (getenv "GO_GURU_REMOTE_GOROOT") (getenv "GOROOT") fname)))
+
+
 (define-compilation-mode go-guru-output-mode "Go guru"
   "Go guru output mode is a variant of `compilation-mode' for the
 output of the Go guru tool."
   (set (make-local-variable 'compilation-error-screen-columns) nil)
   (set (make-local-variable 'compilation-filter-hook) #'go-guru--compilation-filter-hook)
   (set (make-local-variable 'compilation-start-hook) #'go-guru--compilation-start-hook))
+
 
 (defun go-guru--compilation-filter-hook ()
   "Post-process a blob of input to the go-guru-output buffer."
@@ -215,7 +228,7 @@ output of the Go guru tool."
   ;; This usually includes the last segment of the package name.
   ;; Hide the line and column numbers.
   (let ((start compilation-filter-start)
-	(end (point)))
+		(end (point)))
     (goto-char start)
     (unless (bolp)
       ;; TODO(adonovan): not quite right: the filter may be called
@@ -225,17 +238,28 @@ output of the Go guru tool."
     (setq start (point))
     (while (< start end)
       (let ((p (search-forward ": " end t)))
-	(if (null p)
-	    (setq start end) ; break out of loop
-	  (setq p (1- p)) ; exclude final space
-	  (let* ((posn (buffer-substring-no-properties start p))
-		 (flen (cl-search ":" posn)) ; length of filename
-		 (filename (if (< flen 19)
-			       (substring posn 0 flen)
-			     (concat "…" (substring posn (- flen 19) flen)))))
-	    (put-text-property start p 'display filename)
-	    (forward-line 1)
-	    (setq start (point))))))))
+		(if (null p)
+			(setq start end) ; break out of loop
+		  (setq p (1- p)) ; exclude final space
+		  (let* ((fname (buffer-substring-no-properties start p))
+				 (after-hook-fname (apply-hooks go-guru-filename-filter-hooks fname))
+				 (flen (cl-search ":" after-hook-fname))
+				 (total-flen (string-width after-hook-fname))
+				 (display-filename (if (< flen 19)
+									   (substring after-hook-fname 0 flen)
+									 (concat "…" (substring after-hook-fname (- flen 19) flen)))))
+			(delete-region start p)
+			(insert after-hook-fname)
+			(put-text-property start (+ start total-flen) 'display display-filename)
+			(forward-line 1)
+			(setq start (point))))))))
+
+
+(defun apply-hooks (funcs fname)
+  (if (not funcs)
+	  fname
+	(apply-hooks (cdr funcs) (funcall (car funcs) fname))))
+
 
 (defun go-guru--compilation-start-hook (proc)
   "Erase default output header inserted by `compilation-mode'."
@@ -243,6 +267,9 @@ output of the Go guru tool."
     (let ((inhibit-read-only t))
       (goto-char (point-min))
       (delete-region (point) (point-max)))))
+
+(defun go-guru--trim-gopath (filepath)
+  (replace-regexp-in-string (getenv "GOPATH") "$GOPATH" filepath))
 
 (defun go-guru--start (mode)
   "Start an asynchronous Go guru process for the specified query
@@ -252,8 +279,10 @@ buffers.  Its output is handled by `go-guru-output-mode', a
 variant of `compilation-mode'."
   (or buffer-file-name
       (error "Cannot use guru on a buffer without a file name"))
-  (let* ((filename (file-truename buffer-file-name))
-	 (cmd (mapconcat #'shell-quote-argument (go-guru--command mode filename) " "))
+  (let* ((filename (go-guru--trim-gopath (file-truename buffer-file-name)))
+		 (cmd-pre (mapconcat #'shell-quote-argument (go-guru--command mode filename) " "))
+		 (cmd (format "ssh centos_devbox 'bash -lc \"%s\"'" cmd-pre))
+		 (foo 	 (message "cmd: %s" cmd))
 	 (process-connection-type nil) ; use pipe (not pty) so EOF closes stdin
 	 (procbuf (compilation-start cmd 'go-guru-output-mode)))
     (with-current-buffer procbuf
